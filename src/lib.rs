@@ -458,7 +458,7 @@ impl<T: Send + Sync + 'static> Picker<T> {
             sleep(deadline - Instant::now());
         };
 
-        disable_raw_mode()?;
+        // disable_raw_mode()?;
         execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
         Ok(selection)
     }
