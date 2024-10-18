@@ -362,6 +362,7 @@ impl PickerState {
 /// [usage examples](https://github.com/autobib/nucleo-picker/tree/master/examples).
 pub struct Picker<T: Send + Sync + 'static> {
     matcher: Nucleo<T>,
+    must_reset_term: bool,
 }
 
 impl<T: Send + Sync + 'static> Default for Picker<T> {
@@ -389,6 +390,7 @@ impl<T: Send + Sync + 'static> Picker<T> {
     pub fn new(config: Config, num_threads: Option<usize>, columns: u32) -> Self {
         Self {
             matcher: Nucleo::new(config, Arc::new(|| {}), num_threads, columns),
+            must_reset_term: true,
         }
     }
 
@@ -396,7 +398,13 @@ impl<T: Send + Sync + 'static> Picker<T> {
     pub fn with_config(config: Config) -> Self {
         Self {
             matcher: Nucleo::new(config, Arc::new(|| {}), Self::default_thread_count(), 1),
+            must_reset_term: true,
         }
+    }
+
+    pub fn without_reset(mut self) -> Self {
+        self.must_reset_term = false;
+        self
     }
 
     /// Get an [`Injector`] from the internal [`Nucleo`] instance.
@@ -458,8 +466,10 @@ impl<T: Send + Sync + 'static> Picker<T> {
             sleep(deadline - Instant::now());
         };
 
-        // disable_raw_mode()?;
-        // execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+        if self.must_reset_term {
+            disable_raw_mode()?;
+            execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+        }
         Ok(selection)
     }
 }
