@@ -459,7 +459,7 @@ impl<T: Send + Sync + 'static> Picker<T> {
         };
 
         // disable_raw_mode()?;
-        execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+        // execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
         Ok(selection)
     }
 }
