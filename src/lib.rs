@@ -13,7 +13,7 @@ pub mod fill;
 use std::{
     cmp::min,
     io::{self, Error, ErrorKind},
-    process::{exit, Child, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::Arc,
     thread::{available_parallelism, sleep},
     time::{Duration, Instant},
@@ -26,9 +26,8 @@ use crate::{
 use anyhow::{bail, Result};
 use component::View;
 use crossterm::{
-    event::{poll, read, DisableBracketedPaste},
-    execute,
-    terminal::{disable_raw_mode, size, LeaveAlternateScreen},
+    event::{poll, read},
+    terminal::size,
     tty::IsTty,
 };
 use nucleo::{Config, Injector, Nucleo, Utf32String};
