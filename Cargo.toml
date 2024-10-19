@@ -8,8 +8,10 @@ repository = "https://github.com/autobib/nucleo-picker"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-crossterm = "0.28"
+anyhow = "1.0.90"
+crossterm = "0.28.1"
 nucleo = "0.5"
+ratatui = "0.28.1"
 
 [dev-dependencies]
 walkdir = "2.5"

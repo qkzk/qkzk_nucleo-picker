@@ -15,7 +15,6 @@ pub enum Event {
     MoveToEnd,
     Delete,
     Quit,
-    Abort,
     Resize(u16, u16),
     Insert(char),
     Select,
@@ -31,7 +30,7 @@ pub fn convert(event: CrosstermEvent) -> Option<Event> {
             code,
             ..
         }) => match code {
-            KeyCode::Char('c') => Some(Event::Abort),
+            KeyCode::Char('c') => Some(Event::Quit),
             KeyCode::Char('g') | KeyCode::Char('q') => Some(Event::Quit),
             KeyCode::Char('k') | KeyCode::Char('p') => Some(Event::MoveUp),
             KeyCode::Char('j') | KeyCode::Char('n') => Some(Event::MoveDown),

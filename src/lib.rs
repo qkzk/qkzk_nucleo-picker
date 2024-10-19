@@ -12,33 +12,33 @@ pub mod fill;
 
 use std::{
     cmp::min,
-    io::{self, Stdout, Write},
-    process::exit,
+    io::{self, Error, ErrorKind},
+    process::{exit, Child, Command, Stdio},
     sync::Arc,
     thread::{available_parallelism, sleep},
     time::{Duration, Instant},
 };
 
-use crossterm::{
-    cursor::{MoveTo, MoveToColumn, MoveToPreviousLine, MoveUp},
-    event::{poll, read, DisableBracketedPaste, EnableBracketedPaste},
-    execute,
-    style::{
-        Attribute, Color, Print, PrintStyledContent, ResetColor, SetAttribute, SetForegroundColor,
-        Stylize,
-    },
-    terminal::{
-        disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
-    tty::IsTty,
-    QueueableCommand,
-};
-use nucleo::{Config, Injector, Nucleo, Utf32String};
-
 use crate::{
     bind::{convert, Event},
     component::{Edit, EditableString},
+};
+use anyhow::{bail, Result};
+use component::View;
+use crossterm::{
+    event::{poll, read, DisableBracketedPaste},
+    execute,
+    terminal::{disable_raw_mode, size, LeaveAlternateScreen},
+    tty::IsTty,
+};
+use nucleo::{Config, Injector, Nucleo, Utf32String};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Position, Rect},
+    restore,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+    DefaultTerminal, Frame,
 };
 
 pub use nucleo;
@@ -79,16 +79,6 @@ impl Dimensions {
         }
     }
 
-    pub fn move_to_end_of_line(&self) -> MoveToColumn {
-        MoveToColumn(self.width - 1)
-    }
-
-    /// The [`MoveTo`] command for setting the cursor at the bottom left corner of the match
-    /// printing area.
-    pub fn move_to_results_start(&self) -> MoveTo {
-        MoveTo(0, self.max_draw_count())
-    }
-
     /// The maximum width of the prompt string display window.
     pub fn prompt_max_width(&self) -> usize {
         self.width
@@ -105,21 +95,6 @@ impl Dimensions {
     /// The maximum length on which a match can be drawn.
     pub fn max_draw_length(&self) -> u16 {
         self.width.saturating_sub(2)
-    }
-
-    /// The y index of the prompt string.
-    fn prompt_y(&self) -> u16 {
-        self.height.saturating_sub(1)
-    }
-
-    /// The command to move to the start of the prompt rendering region.
-    pub fn move_to_prompt(&self) -> MoveTo {
-        MoveTo(0, self.prompt_y())
-    }
-
-    /// The command to move to the cursor position.
-    pub fn move_to_cursor(&self, view_position: usize) -> MoveTo {
-        MoveTo((view_position + 2) as _, self.prompt_y())
     }
 }
 
@@ -212,23 +187,6 @@ impl PickerState {
         self.needs_redraw |= self.prompt.edit(st);
     }
 
-    /// Format a [`Utf32String`] for displaying. Currently:
-    /// - Delete control characters.
-    /// - Truncates the string to an appropriate length.
-    /// - Replaces any newline characters with spaces.
-    fn format_display(&self, display: &Utf32String) -> String {
-        display
-            .slice(..)
-            .chars()
-            .filter(|ch| !ch.is_control())
-            .take(self.dimensions.max_draw_length() as _)
-            .map(|ch| match ch {
-                '\n' => ' ',
-                s => s,
-            })
-            .collect()
-    }
-
     /// Clear the queued events.
     fn handle(&mut self) -> Result<EventSummary, io::Error> {
         let mut update_prompt = false;
@@ -237,7 +195,6 @@ impl PickerState {
         while poll(Duration::from_millis(5))? {
             if let Some(event) = convert(read()?) {
                 match event {
-                    Event::Abort => exit(1),
                     Event::MoveToStart => self.edit_prompt(Edit::ToStart),
                     Event::MoveToEnd => self.edit_prompt(Edit::ToEnd),
                     Event::Insert(ch) => {
@@ -247,8 +204,8 @@ impl PickerState {
                         self.edit_prompt(Edit::Insert(ch));
                     }
                     Event::Select => return Ok(EventSummary::Select),
-                    Event::MoveUp => self.incr_selection(),
-                    Event::MoveDown => self.decr_selection(),
+                    Event::MoveUp => self.decr_selection(),
+                    Event::MoveDown => self.incr_selection(),
                     Event::MoveLeft => self.edit_prompt(Edit::Left),
                     Event::MoveRight => self.edit_prompt(Edit::Right),
                     Event::Delete => {
@@ -275,80 +232,6 @@ impl PickerState {
         })
     }
 
-    /// Draw the terminal to the screen. This assumes that the draw count has been updated and the
-    /// selector index has been properly clamped, or this method will panic!
-    pub fn draw<T: Send + Sync + 'static>(
-        &mut self,
-        stdout: &mut Stdout,
-        snapshot: &nucleo::Snapshot<T>,
-    ) -> Result<(), io::Error> {
-        if self.needs_redraw {
-            // reset redraw state
-            self.needs_redraw = false;
-
-            // draw the match counts
-            stdout.queue(self.dimensions.move_to_results_start())?;
-            stdout
-                .queue(SetAttribute(Attribute::Italic))?
-                .queue(SetForegroundColor(Color::Green))?
-                .queue(Print("  "))?
-                .queue(Print(self.matched_item_count))?
-                .queue(Print("/"))?
-                .queue(Print(self.item_count))?
-                .queue(SetAttribute(Attribute::Reset))?
-                .queue(ResetColor)?
-                .queue(Clear(ClearType::UntilNewLine))?;
-
-            // draw the matches
-            for (idx, it) in snapshot.matched_items(..self.draw_count as u32).enumerate() {
-                let render = self.format_display(&it.matcher_columns[0]);
-                if Some(idx) == self.selector_index.map(|i| i as _) {
-                    if let Some(previewer) = &self.previewer {
-                        previewer.run(&render);
-                    }
-                    stdout
-                        .queue(MoveToPreviousLine(1))?
-                        .queue(SetAttribute(Attribute::Bold))?
-                        .queue(PrintStyledContent("▌ ".with(Color::Magenta)))? // selection indicator
-                        .queue(Print(render))?
-                        .queue(SetAttribute(Attribute::Reset))?
-                        .queue(Clear(ClearType::UntilNewLine))?;
-                } else {
-                    stdout
-                        .queue(MoveToPreviousLine(1))?
-                        .queue(Print("  "))?
-                        .queue(Print(render))?
-                        .queue(Clear(ClearType::UntilNewLine))?;
-                }
-            }
-
-            // clear above the current matches
-            if self.draw_count != self.dimensions.max_draw_count() {
-                stdout
-                    .queue(MoveUp(1))?
-                    .queue(self.dimensions.move_to_end_of_line())?
-                    .queue(Clear(ClearType::FromCursorUp))?;
-            }
-
-            // render the prompt string
-            let view = self.prompt.view_padded(
-                self.dimensions.prompt_left_padding as _,
-                self.dimensions.prompt_right_padding as _,
-            );
-            stdout
-                .queue(self.dimensions.move_to_prompt())?
-                .queue(Print("> "))?
-                .queue(Print(&view))?
-                .queue(Clear(ClearType::UntilNewLine))?
-                .queue(self.dimensions.move_to_cursor(view.index()))?;
-
-            // flush to terminal
-            stdout.flush()
-        } else {
-            Ok(())
-        }
-    }
-
     /// Resize the terminal state on screen size change.
     pub fn resize(&mut self, width: u16, height: u16) {
         self.needs_redraw = true;
@@ -356,6 +239,198 @@ impl PickerState {
         self.prompt.resize(self.dimensions.prompt_max_width());
         self.clamp_draw_count();
         self.clamp_selector_index();
+    }
+}
+
+struct Display<'a, T: Send + Sync + 'static> {
+    picker_state: &'a PickerState,
+    snapshot: &'a nucleo::Snapshot<T>,
+}
+
+impl<'a, T: Send + Sync + 'static> Display<'a, T> {
+    fn new(picker_state: &'a PickerState, snapshot: &'a nucleo::Snapshot<T>) -> Self {
+        Self {
+            picker_state,
+            snapshot,
+        }
+    }
+
+    fn draw(&mut self, term: &'a mut DefaultTerminal) -> Result<()> {
+        term.draw(|f| {
+            let rects = self.build_layout(f.area());
+
+            // Draw the match counts at the top
+            let match_info = self.line_match_info();
+            let match_count_paragraph = Self::paragraph_match_count(match_info);
+            f.render_widget(match_count_paragraph, rects[0]);
+
+            // Draw the matched items
+            let (items_paragraph, previewed) = self.paragraph_matches();
+            f.render_widget(items_paragraph, rects[1]);
+            if previewed.is_some() {
+                self.draw_preview(f, rects[3], previewed);
+            }
+
+            // Draw the prompt at the bottom
+            self.draw_prompt(f, rects[2]);
+        })?;
+        Ok(())
+    }
+
+    fn build_layout(&self, area: Rect) -> Vec<Rect> {
+        if self.picker_state.previewer.is_none() {
+            Self::rect_without_preview(area)
+        } else {
+            Self::rects_with_preview(area)
+        }
+    }
+
+    fn rect_without_preview(area: Rect) -> Vec<Rect> {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Min(0),
+            ])
+            .split(area)
+            .to_vec()
+    }
+
+    fn rects_with_preview(area: Rect) -> Vec<Rect> {
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        let mut chunks = Self::rect_without_preview(horizontal[0]);
+        chunks.push(horizontal[1]);
+        chunks
+    }
+
+    fn line_match_info(&self) -> Line {
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", self.picker_state.matched_item_count),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", self.picker_state.item_count),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    }
+
+    fn paragraph_match_count(match_info: Line) -> Paragraph {
+        Paragraph::new(match_info)
+            .style(Style::default())
+            .block(Block::default().borders(Borders::NONE))
+    }
+
+    fn paragraph_matches(&self) -> (Paragraph, Option<String>) {
+        let mut items: Vec<Line> = vec![];
+        let mut previewed = None;
+
+        for (index, item) in self
+            .snapshot
+            .matched_items(..self.picker_state.draw_count as u32)
+            .enumerate()
+        {
+            let render = self.format_utf32(&item.matcher_columns[0]);
+
+            let item_spans = if Some(index) == self.picker_state.selector_index.map(|i| i as _) {
+                if self.picker_state.previewer.is_some() {
+                    previewed = Some(render.clone());
+                }
+                Self::selected_line(render)
+            } else {
+                Self::non_selected_line(render)
+            };
+            items.push(item_spans);
+        }
+        (Paragraph::new(items), previewed)
+    }
+
+    /// Format a [`Utf32String`] for displaying. Currently:
+    /// - Delete control characters.
+    /// - Truncates the string to an appropriate length.
+    /// - Replaces any newline characters with spaces.
+    fn format_utf32(&self, utf32: &Utf32String) -> String {
+        utf32
+            .slice(..)
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(self.picker_state.dimensions.max_draw_length() as _)
+            .map(|ch| match ch {
+                '\n' => ' ',
+                s => s,
+            })
+            .collect()
+    }
+
+    fn draw_preview(&self, f: &mut Frame, rect: Rect, previewed: Option<String>) {
+        let Some(previewer) = &self.picker_state.previewer else {
+            return;
+        };
+        let Some(previewed) = previewed else {
+            return;
+        };
+        f.render_widget(
+            Self::paragraph_preview(&previewer.run(&previewed).unwrap()),
+            rect,
+        );
+    }
+
+    fn paragraph_preview(preview_output: &str) -> Paragraph {
+        Paragraph::new(preview_output).block(Block::default().borders(Borders::LEFT))
+    }
+
+    fn selected_line(render: String) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                "▌ ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(render),
+        ])
+    }
+
+    fn non_selected_line(render: String) -> Line<'static> {
+        Line::from(vec![Span::raw("  "), Span::raw(render)])
+    }
+
+    fn draw_prompt(&self, f: &mut Frame, rect: Rect) {
+        // Render the prompt string at the bottom
+        let prompt_view = self.prompt_view();
+        let prompt_paragraph = Paragraph::new(vec![Line::from(vec![
+            Span::raw("> "),
+            Span::raw(prompt_view.to_string()),
+        ])])
+        .block(Block::default().borders(Borders::NONE));
+
+        // Render the prompt at the bottom of the layout
+        f.render_widget(prompt_paragraph, rect);
+        self.set_cursor_position(f, rect, &prompt_view);
+    }
+
+    fn prompt_view(&self) -> View<char> {
+        self.picker_state.prompt.view_padded(
+            self.picker_state.dimensions.prompt_left_padding as _,
+            self.picker_state.dimensions.prompt_right_padding as _,
+        )
+    }
+
+    fn set_cursor_position(&self, f: &mut Frame, rect: Rect, prompt_view: &View<char>) {
+        // Move the cursor to the prompt
+        f.set_cursor_position(Position {
+            x: rect.x + prompt_view.index() as u16 + 2, // Adjust the cursor position for "> "
+            y: rect.y,
+        });
     }
 }
 
@@ -370,6 +445,7 @@ pub struct Picker<T: Send + Sync + 'static> {
     matcher: Nucleo<T>,
     must_reset_term: bool,
     previewer: Option<Previewer>,
+    term: DefaultTerminal,
 }
 
 impl<T: Send + Sync + 'static> Default for Picker<T> {
@@ -399,16 +475,13 @@ impl<T: Send + Sync + 'static> Picker<T> {
             matcher: Nucleo::new(config, Arc::new(|| {}), num_threads, columns),
             must_reset_term: true,
             previewer: None,
+            term: ratatui::init(),
         }
     }
 
     /// Create a new [`Picker`] instance with the given configuration.
     pub fn with_config(config: Config) -> Self {
-        Self {
-            matcher: Nucleo::new(config, Arc::new(|| {}), Self::default_thread_count(), 1),
-            must_reset_term: true,
-            previewer: None,
-        }
+        Self::new(config, Self::default_thread_count(), 1)
     }
 
     pub fn without_reset(mut self) -> Self {
@@ -427,39 +500,35 @@ impl<T: Send + Sync + 'static> Picker<T> {
     }
 
     /// Open the interactive picker prompt and return the picked item, if any.
-    pub fn pick(&mut self) -> Result<Option<&T>, io::Error> {
+    pub fn pick(&mut self) -> Result<Option<&T>> {
+        eprintln!("enabled raw mode");
         if !std::io::stdin().is_tty() {
-            return Err(io::Error::new(io::ErrorKind::Other, "is not interactive"));
+            bail!("is not interactive");
         }
-
         self.pick_inner(Self::default_frame_interval())
     }
 
     /// The actual picker implementation.
-    fn pick_inner(&mut self, interval: Duration) -> Result<Option<&T>, io::Error> {
-        let mut stdout = io::stdout();
-        let mut term = PickerState::new(size()?, self.previewer.clone());
-
-        enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    fn pick_inner(&mut self, interval: Duration) -> Result<Option<&T>> {
+        let mut picker_state = PickerState::new(size()?, self.previewer.clone());
 
         let selection = loop {
             let deadline = Instant::now() + interval;
 
             // process any queued keyboard events and reset pattern if necessary
-            match term.handle()? {
+            match picker_state.handle()? {
                 EventSummary::Continue => {}
                 EventSummary::UpdatePrompt(append) => {
                     self.matcher.pattern.reparse(
                         0,
-                        &term.prompt.full_contents(),
+                        &picker_state.prompt.full_contents(),
                         nucleo::pattern::CaseMatching::Smart,
                         nucleo::pattern::Normalization::Smart,
                         append,
                     );
                 }
                 EventSummary::Select => {
-                    break term
+                    break picker_state
                         .selector_index
                         .and_then(|idx| self.matcher.snapshot().get_matched_item(idx as _))
                         .map(|it| it.data);
@@ -471,18 +540,20 @@ impl<T: Send + Sync + 'static> Picker<T> {
 
             // increment the matcher and update state
             let status = self.matcher.tick(10);
-            term.update(status.changed, self.matcher.snapshot());
+            picker_state.update(status.changed, self.matcher.snapshot());
 
             // redraw the screen
-            term.draw(&mut stdout, self.matcher.snapshot())?;
+            if picker_state.needs_redraw {
+                Display::new(&picker_state, self.matcher.snapshot()).draw(&mut self.term)?;
+            }
 
             // wait if frame rendering finishes early
             sleep(deadline - Instant::now());
         };
 
         if self.must_reset_term {
-            disable_raw_mode()?;
-            execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+            restore();
+            eprintln!("disabled raw mode");
         }
         Ok(selection)
     }
@@ -498,44 +569,41 @@ impl Previewer {
         Self { command }
     }
 
-    fn run(&self, content: &str) {
-        let mut args = parse_command(&self.command, content);
-        if args.is_empty() {
-            return;
-        }
-        let exe = args.remove(0);
-        let child = std::process::Command::new(exe)
-            .args(&args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("Spawn failed");
-        let output = child.wait_with_output().expect("Command failed");
-        let mut stderr = std::io::stderr();
-        if output.status.success() {
-            writeln!(
-                stderr,
-                "Success:\n{success}",
-                success = String::from_utf8(output.stdout).unwrap()
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                stderr,
-                "Failure:\n{error}",
-                error = String::from_utf8(output.stderr).unwrap()
-            )
-            .unwrap();
-        }
+    fn run(&self, content: &str) -> Result<String> {
+        let args = self.parse(content);
+        let child = Self::spawn(args)?;
+        Self::execute_and_output(child)
     }
-}
 
-fn parse_command(command: &str, content: &str) -> Vec<String> {
-    command
-        .split(' ')
-        .map(|arg| match arg {
-            "%t" => content.to_owned(),
-            arg => arg.to_owned(),
-        })
-        .collect()
+    fn parse(&self, content: &str) -> Vec<String> {
+        self.command
+            .split(' ')
+            .map(|arg| match arg {
+                "%t" => content.to_owned(),
+                arg => arg.to_owned(),
+            })
+            .collect()
+    }
+
+    fn spawn(mut args: Vec<String>) -> io::Result<Child> {
+        if args.is_empty() {
+            return Err(Error::new(ErrorKind::InvalidData, "Empty preview command"));
+        }
+        let program = args.remove(0);
+        Command::new(program)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    }
+
+    fn execute_and_output(child: Child) -> Result<String> {
+        let output = child.wait_with_output()?;
+        let result = if output.status.success() {
+            output.stdout
+        } else {
+            output.stderr
+        };
+        Ok(String::from_utf8(result)?)
+    }
 }

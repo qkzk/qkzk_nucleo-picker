@@ -2,18 +2,20 @@
 //!
 //! Iterate over directories to populate the picker, but do not block so that matching can be done
 //! while the picker is populated.
-use std::{env::args, io, path::PathBuf, thread::spawn};
+use std::{env::args, path::PathBuf, thread::spawn};
+
+use anyhow::Result;
+use nucleo_picker::{nucleo::Config, Picker};
 use walkdir::WalkDir;
 
-use nucleo_picker::{nucleo::Config, Picker};
-
-fn main() -> io::Result<()> {
+fn main() -> Result<()> {
     // See the nucleo configuration for more options:
     //   https://docs.rs/nucleo/latest/nucleo/struct.Config.html
     let config = Config::DEFAULT.match_paths();
 
     // Initialize a picker with the provided configuration
-    let mut picker = Picker::with_config(config);
+    let mut picker =
+        Picker::with_config(config).with_previewer("/usr/bin/bat %t --color=never".to_string());
 
     // "argument parsing"
     let root: PathBuf = match args().nth(1) {

@@ -1,0 +1,24 @@
+   Compiling nucleo-picker v0.4.2 (/home/quentin/gclem/dev/rust/qkzk_nucleo-picker)
+warning: unused import: `exit`
+  --> src/lib.rs:16:15
+   |
+16 |     process::{exit, Child, Command, Stdio},
+   |               ^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `DisableBracketedPaste`, `LeaveAlternateScreen`, `disable_raw_mode`, and `execute`
+  --> src/lib.rs:29:25
+   |
+29 |     event::{poll, read, DisableBracketedPaste},
+   |                         ^^^^^^^^^^^^^^^^^^^^^
+30 |     execute,
+   |     ^^^^^^^
+31 |     terminal::{disable_raw_mode, size, LeaveAlternateScreen},
+   |                ^^^^^^^^^^^^^^^^        ^^^^^^^^^^^^^^^^^^^^
+
+warning: `nucleo-picker` (lib) generated 2 warnings (run `cargo fix --lib -p nucleo-picker` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running `target/debug/examples/find`
+enabled raw mode
+disabled raw mode
