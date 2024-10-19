@@ -27,8 +27,10 @@ use anyhow::{bail, Result};
 use component::View;
 use crossterm::{
     event::{poll, read},
-    terminal::size,
+    execute,
+    terminal::{size, Clear, ClearType},
     tty::IsTty,
+    ExecutableCommand,
 };
 use nucleo::{Config, Injector, Nucleo, Utf32String};
 use ratatui::{
@@ -470,8 +472,12 @@ impl<T: Send + Sync + 'static> Picker<T> {
 
     /// Create a new [`Picker`] instance with arguments passed to [`Nucleo`].
     pub fn new(config: Config, num_threads: Option<usize>, columns: u32) -> Self {
-        let mut term = ratatui::init();
-        term.clear().expect("Couldn't clear the terminal");
+        let term = ratatui::init();
+
+        let mut stdout = std::io::stdout();
+        execute!(stdout, Clear(ClearType::All)).unwrap();
+        execute!(stdout, Clear(ClearType::Purge)).unwrap();
+
         Self {
             matcher: Nucleo::new(config, Arc::new(|| {}), num_threads, columns),
             must_reset_term: true,
