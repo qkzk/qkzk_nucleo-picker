@@ -140,11 +140,13 @@ struct PickerState {
     matched_item_count: u32,
     /// Has the state changed?
     needs_redraw: bool,
+    /// Previewer
+    previewer: Option<Previewer>,
 }
 
 impl PickerState {
     /// The initial picker state.
-    pub fn new(screen: (u16, u16)) -> Self {
+    pub fn new(screen: (u16, u16), previewer: Option<Previewer>) -> Self {
         let dimensions = Dimensions::from_screen(screen.0, screen.1);
         let prompt = EditableString::new(dimensions.prompt_max_width());
 
@@ -156,6 +158,7 @@ impl PickerState {
             matched_item_count: 0,
             item_count: 0,
             needs_redraw: true,
+            previewer,
         }
     }
 
@@ -300,6 +303,9 @@ impl PickerState {
             for (idx, it) in snapshot.matched_items(..self.draw_count as u32).enumerate() {
                 let render = self.format_display(&it.matcher_columns[0]);
                 if Some(idx) == self.selector_index.map(|i| i as _) {
+                    if let Some(previewer) = &self.previewer {
+                        previewer.run(&render);
+                    }
                     stdout
                         .queue(MoveToPreviousLine(1))?
                         .queue(SetAttribute(Attribute::Bold))?
@@ -363,6 +369,7 @@ impl PickerState {
 pub struct Picker<T: Send + Sync + 'static> {
     matcher: Nucleo<T>,
     must_reset_term: bool,
+    previewer: Option<Previewer>,
 }
 
 impl<T: Send + Sync + 'static> Default for Picker<T> {
@@ -391,6 +398,7 @@ impl<T: Send + Sync + 'static> Picker<T> {
         Self {
             matcher: Nucleo::new(config, Arc::new(|| {}), num_threads, columns),
             must_reset_term: true,
+            previewer: None,
         }
     }
 
@@ -399,11 +407,17 @@ impl<T: Send + Sync + 'static> Picker<T> {
         Self {
             matcher: Nucleo::new(config, Arc::new(|| {}), Self::default_thread_count(), 1),
             must_reset_term: true,
+            previewer: None,
         }
     }
 
     pub fn without_reset(mut self) -> Self {
         self.must_reset_term = false;
+        self
+    }
+
+    pub fn with_previewer(mut self, command: String) -> Self {
+        self.previewer = Some(Previewer::new(command));
         self
     }
 
@@ -424,7 +438,7 @@ impl<T: Send + Sync + 'static> Picker<T> {
     /// The actual picker implementation.
     fn pick_inner(&mut self, interval: Duration) -> Result<Option<&T>, io::Error> {
         let mut stdout = io::stdout();
-        let mut term = PickerState::new(size()?);
+        let mut term = PickerState::new(size()?, self.previewer.clone());
 
         enable_raw_mode()?;
         execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
@@ -472,4 +486,56 @@ impl<T: Send + Sync + 'static> Picker<T> {
         }
         Ok(selection)
     }
+}
+
+#[derive(Default, Clone, Debug)]
+struct Previewer {
+    command: String,
+}
+
+impl Previewer {
+    fn new(command: String) -> Self {
+        Self { command }
+    }
+
+    fn run(&self, content: &str) {
+        let mut args = parse_command(&self.command, content);
+        if args.is_empty() {
+            return;
+        }
+        let exe = args.remove(0);
+        let child = std::process::Command::new(exe)
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Spawn failed");
+        let output = child.wait_with_output().expect("Command failed");
+        let mut stderr = std::io::stderr();
+        if output.status.success() {
+            writeln!(
+                stderr,
+                "Success:\n{success}",
+                success = String::from_utf8(output.stdout).unwrap()
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                stderr,
+                "Failure:\n{error}",
+                error = String::from_utf8(output.stderr).unwrap()
+            )
+            .unwrap();
+        }
+    }
+}
+
+fn parse_command(command: &str, content: &str) -> Vec<String> {
+    command
+        .split(' ')
+        .map(|arg| match arg {
+            "%t" => content.to_owned(),
+            arg => arg.to_owned(),
+        })
+        .collect()
 }
