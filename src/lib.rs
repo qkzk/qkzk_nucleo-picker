@@ -470,11 +470,13 @@ impl<T: Send + Sync + 'static> Picker<T> {
 
     /// Create a new [`Picker`] instance with arguments passed to [`Nucleo`].
     pub fn new(config: Config, num_threads: Option<usize>, columns: u32) -> Self {
+        let mut term = ratatui::init();
+        term.clear().expect("Couldn't clear the terminal");
         Self {
             matcher: Nucleo::new(config, Arc::new(|| {}), num_threads, columns),
             must_reset_term: true,
             previewer: None,
-            term: ratatui::init(),
+            term,
         }
     }
 
